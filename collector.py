@@ -80,7 +80,7 @@ def fetch_all_vehicles(vehicle_type: str) -> list[dict]:
     """Pobiera WSZYSTKIE pojazdy danego typu jednym zapytaniem z retry."""
     resource_id = (RESOURCE_IDS["trams_gps"] if vehicle_type == "tram"
                    else RESOURCE_IDS["buses_gps"])
-    type_code   = "1" if vehicle_type == "tram" else "2"
+    type_code   = "2" if vehicle_type == "tram" else "1"
 
     data = fetch_with_retry(
         f"{BASE_URL}/busestrams_get",
