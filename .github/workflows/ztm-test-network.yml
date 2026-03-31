@@ -1,0 +1,17 @@
+name: ZTM Network Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Test connectivity to ZTM API
+        run: |
+          echo "=== Ping api.um.warszawa.pl ==="
+          curl -v --max-time 10 "https://api.um.warszawa.pl/api/action/busestrams_get?resource_id=f2e5503e927d-4ad3-9500-4ab9e55deb59&type=1&apikey=${{ secrets.ZTM_API_KEY }}" 2>&1 | head -50
+
+          echo ""
+          echo "=== IP GitHub Actions ==="
+          curl -s https://api.ipify.org
