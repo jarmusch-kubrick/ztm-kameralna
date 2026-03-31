@@ -108,7 +108,7 @@ ALL_LINES = sorted(set(
 RESOURCE_IDS = {
     "stops_by_name": "b27f4c17-5c50-4a5b-89dd-236b282bc499",
     "timetable":     "88cd555f-6f31-43ca-9de4-66c479ad5942",
-    "buses_gps":     "f2e5503e-927d-4ad3-9500-4ab9e55deb59",
+    "buses_gps":     "f2e5503e927d-4ad3-9500-4ab9e55deb59",
     "trams_gps":     "c7238cfe-8b1f-4c38-bb4a-de386db7e776",
 }
 
