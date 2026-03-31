@@ -15,6 +15,7 @@ import os
 import csv
 import sys
 import math
+import time
 import httpx
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -22,14 +23,18 @@ from stops import STOPS, ALL_LINES, RESOURCE_IDS
 
 # ─── KONFIGURACJA ─────────────────────────────────────────────────────────────
 
-API_KEY   = os.environ.get("ZTM_API_KEY", "")
-BASE_URL  = "https://api.um.warszawa.pl/api/action"
-DATA_FILE = Path(__file__).parent / "data" / "delays.csv"
+API_KEY          = os.environ.get("ZTM_API_KEY", "")
+BASE_URL         = "https://api.um.warszawa.pl/api/action"
+DATA_FILE        = Path(__file__).parent / "data" / "delays.csv"
 
-WARSAW_TZ       = timezone(timedelta(hours=2))
+WARSAW_TZ        = timezone(timedelta(hours=2))
 NEARBY_RADIUS_KM = 0.8
-CENTER_LAT      = 52.2601
-CENTER_LON      = 21.0456
+CENTER_LAT       = 52.2601
+CENTER_LON       = 21.0456
+
+MAX_RETRIES      = 3
+RETRY_DELAY_SEC  = 5
+REQUEST_TIMEOUT  = 60
 
 CSV_HEADERS = [
     "timestamp", "timestamp_local", "line", "vehicle_type",
@@ -50,83 +55,84 @@ def haversine_km(lat1, lon1, lat2, lon2):
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
+def fetch_with_retry(url: str, params: dict) -> dict | None:
+    """Wykonuje zapytanie HTTP z retry przy timeoucie lub błędzie."""
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            resp = httpx.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.TimeoutException:
+            print(f"  ⏱️  Timeout (próba {attempt}/{MAX_RETRIES})")
+            if attempt < MAX_RETRIES:
+                print(f"  🔄 Ponawianie za {RETRY_DELAY_SEC}s...")
+                time.sleep(RETRY_DELAY_SEC)
+        except httpx.HTTPError as e:
+            print(f"  ⚠️  Błąd HTTP (próba {attempt}/{MAX_RETRIES}): {e}")
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_DELAY_SEC)
+
+    print(f"  ❌ Wszystkie {MAX_RETRIES} próby nieudane — API ZTM niedostępne")
+    return None
+
+
 def fetch_all_vehicles(vehicle_type: str) -> list[dict]:
-    """
-    Pobiera WSZYSTKIE pojazdy danego typu jednym zapytaniem.
-    Znacznie szybsze niż pytanie o każdą linię osobno.
-    """
+    """Pobiera WSZYSTKIE pojazdy danego typu jednym zapytaniem z retry."""
     resource_id = (RESOURCE_IDS["trams_gps"] if vehicle_type == "tram"
                    else RESOURCE_IDS["buses_gps"])
     type_code   = "1" if vehicle_type == "tram" else "2"
 
-    try:
-        resp = httpx.get(
-            f"{BASE_URL}/busestrams_get",
-            params={
-                "resource_id": resource_id,
-                "apikey":      API_KEY,
-                "type":        type_code,
-            },
-            timeout=30,  # jedno zapytanie, można dać więcej czasu
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    data = fetch_with_retry(
+        f"{BASE_URL}/busestrams_get",
+        {"resource_id": resource_id, "apikey": API_KEY, "type": type_code}
+    )
 
-        results = []
-        for v in data.get("result", []):
-            try:
-                results.append({
-                    "line":    str(v.get("Lines", "")).strip(),
-                    "brigade": str(v.get("Brigade", "")).strip(),
-                    "lat":     float(v.get("Lat", 0)),
-                    "lon":     float(v.get("Lon", 0)),
-                    "time":    str(v.get("Time", "")),
-                    "type":    vehicle_type,
-                })
-            except (ValueError, TypeError):
-                continue
-
-        return results
-
-    except httpx.TimeoutException:
-        print(f"  ⚠️  Timeout przy pobieraniu {vehicle_type} — API ZTM nie odpowiada")
+    if not data:
         return []
-    except httpx.HTTPError as e:
-        print(f"  ⚠️  Błąd HTTP {vehicle_type}: {e}")
-        return []
+
+    results = []
+    for v in data.get("result", []):
+        try:
+            results.append({
+                "line":    str(v.get("Lines", "")).strip(),
+                "brigade": str(v.get("Brigade", "")).strip(),
+                "lat":     float(v.get("Lat", 0)),
+                "lon":     float(v.get("Lon", 0)),
+                "type":    vehicle_type,
+            })
+        except (ValueError, TypeError):
+            continue
+
+    return results
 
 
 def fetch_timetable_departures(busstop_id, busstop_nr, line) -> list[str]:
     """Pobiera rozkładowe godziny odjazdów dla przystanku i linii."""
-    try:
-        resp = httpx.get(
-            f"{BASE_URL}/dbtimetable_get",
-            params={
-                "id":        RESOURCE_IDS["timetable"],
-                "busstopId": busstop_id,
-                "busstopNr": busstop_nr,
-                "line":      line,
-                "apikey":    API_KEY,
-            },
-            timeout=20,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    data = fetch_with_retry(
+        f"{BASE_URL}/dbtimetable_get",
+        {
+            "id":        RESOURCE_IDS["timetable"],
+            "busstopId": busstop_id,
+            "busstopNr": busstop_nr,
+            "line":      line,
+            "apikey":    API_KEY,
+        }
+    )
 
-        departures = []
-        for item in data.get("result", []):
-            values = {v["key"]: v["value"] for v in item.get("values", [])}
-            t = values.get("czas", "")
-            if t:
-                departures.append(t)
-        return sorted(departures)
-
-    except httpx.HTTPError:
+    if not data:
         return []
+
+    departures = []
+    for item in data.get("result", []):
+        values = {v["key"]: v["value"] for v in item.get("values", [])}
+        t = values.get("czas", "")
+        if t:
+            departures.append(t)
+
+    return sorted(departures)
 
 
 def calculate_delay(now_local, departures) -> float | None:
-    """Oblicza opóźnienie w minutach względem najbliższego kursu (±30 min)."""
     if not departures:
         return None
 
@@ -149,7 +155,6 @@ def calculate_delay(now_local, departures) -> float | None:
 
 
 def find_nearest_stop(line):
-    """Zwraca pierwszy pasujący przystanek dla danej linii."""
     for stop in STOPS:
         if line in stop["lines"]:
             return stop
@@ -161,12 +166,12 @@ def ensure_csv():
     if not DATA_FILE.exists():
         with open(DATA_FILE, "w", newline="", encoding="utf-8") as f:
             csv.DictWriter(f, fieldnames=CSV_HEADERS).writeheader()
-        print(f"  📄 Utworzono nowy plik: {DATA_FILE}")
 
 
 def append_rows(rows):
     with open(DATA_FILE, "a", newline="", encoding="utf-8") as f:
         csv.DictWriter(f, fieldnames=CSV_HEADERS).writerows(rows)
+
 
 # ─── GŁÓWNA LOGIKA ────────────────────────────────────────────────────────────
 
@@ -186,11 +191,13 @@ def collect():
     new_rows = []
 
     for vehicle_type in ("tram", "bus"):
-        # Jedno zapytanie po WSZYSTKIE pojazdy
+        print(f"  📡 Pobieram {vehicle_type.upper()}...")
         all_vehicles = fetch_all_vehicles(vehicle_type)
-        print(f"  📡 {vehicle_type.upper()}: pobrano {len(all_vehicles)} pojazdów łącznie")
+        print(f"  📡 {vehicle_type.upper()}: {len(all_vehicles)} pojazdów w Warszawie")
 
-        # Filtruj: tylko linie które nas interesują + w pobliżu Kameralnej
+        if not all_vehicles:
+            continue
+
         nearby = 0
         for v in all_vehicles:
             if v["line"] not in ALL_LINES:
@@ -231,17 +238,16 @@ def collect():
                 "stop_id":         stop_id,
             })
 
-        print(f"  🎯 W pobliżu Kameralnej ({NEARBY_RADIUS_KM}km): {nearby} pojazdów")
+        print(f"  🎯 W pobliżu Kameralnej: {nearby} pojazdów")
 
     if new_rows:
         append_rows(new_rows)
-        print(f"  ✅ Zapisano {len(new_rows)} rekordów do CSV")
+        print(f"  ✅ Zapisano {len(new_rows)} rekordów")
     else:
         print("  ℹ️  Brak pojazdów naszych linii w pobliżu Kameralnej")
 
     size = DATA_FILE.stat().st_size / 1024 if DATA_FILE.exists() else 0
-    print(f"  📊 Rozmiar CSV: {size:.1f} KB")
-    return len(new_rows)
+    print(f"  📊 CSV: {size:.1f} KB")
 
 
 if __name__ == "__main__":
