@@ -1,0 +1,55 @@
+name: ZTM Collector
+
+on:
+  schedule:
+    # Co 5 minut (minimum GitHub Actions) — UTC
+    # Uwaga: GitHub scheduler bywa opóźniony o 5-15 minut przy dużym obciążeniu
+    - cron: '*/5 * * * *'
+  # Możliwość ręcznego uruchomienia z panelu Actions
+  workflow_dispatch:
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # potrzebne do git commit/push
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          # Pobierz pełną historię — potrzebne żeby git pull/push działał poprawnie
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install httpx
+
+      - name: Run collector
+        env:
+          ZTM_API_KEY: ${{ secrets.ZTM_API_KEY }}
+        run: python collector.py
+
+      - name: Commit and push new data
+        run: |
+          git config user.name  "ZTM Bot"
+          git config user.email "ztm-bot@kameralna.local"
+
+          # Pull przed commitem — inne workflow mogło też pushować
+          git pull --rebase origin main || true
+
+          git add data/delays.csv
+
+          # Commituj tylko jeśli są zmiany
+          if git diff --staged --quiet; then
+            echo "Brak nowych danych do zaktualizowania"
+          else
+            TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M UTC')
+            git commit -m "data: collect ZTM delays ${TIMESTAMP}"
+            git push origin main
+          fi
