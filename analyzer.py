@@ -1,13 +1,14 @@
 """
 analyzer.py
 ===========
-Czyta ostatnie 24h z data/delays.csv, wysyła do Claude API
-i zapisuje raport do reports/YYYY-MM-DD.md
+Czyta ostatnie 24h z data/delays.csv, wysyła do Claude API,
+generuje raport i zapisuje go do Notion + lokalnie jako .md
 
 Uruchamiany raz dziennie o 6:00 UTC (8:00 PL) przez GitHub Actions.
 
 Wymagane zmienne środowiskowe:
   ANTHROPIC_API_KEY  — klucz z console.anthropic.com
+  NOTION_TOKEN       — klucz integracji Notion
 """
 
 import os
@@ -21,14 +22,18 @@ import httpx
 # ─── KONFIGURACJA ─────────────────────────────────────────────────────────────
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-DATA_FILE         = Path(__file__).parent / "data" / "delays.csv"
-REPORTS_DIR       = Path(__file__).parent / "reports"
-WARSAW_TZ         = timezone(timedelta(hours=2))
+NOTION_TOKEN      = os.environ.get("NOTION_TOKEN", "")
+
+# ID bazy danych w Notion (data source)
+NOTION_DATABASE_ID = "74a9ee68-bf48-4b64-b6ca-311a321ad209"
+
+DATA_FILE    = Path(__file__).parent / "data" / "delays.csv"
+REPORTS_DIR  = Path(__file__).parent / "reports"
+WARSAW_TZ    = timezone(timedelta(hours=2))
 
 # ─── CZYTANIE DANYCH ──────────────────────────────────────────────────────────
 
 def load_last_24h() -> list[dict]:
-    """Wczytuje rekordy z ostatnich 24 godzin."""
     if not DATA_FILE.exists():
         print("❌ Brak pliku data/delays.csv")
         return []
@@ -37,8 +42,7 @@ def load_last_24h() -> list[dict]:
     rows = []
 
     with open(DATA_FILE, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
+        for row in csv.DictReader(f):
             try:
                 ts = datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00"))
                 if ts >= cutoff:
@@ -49,49 +53,45 @@ def load_last_24h() -> list[dict]:
     return rows
 
 
-def summarize(rows: list[dict]) -> str:
+def summarize(rows: list[dict]) -> tuple[str, dict]:
     """
-    Buduje zwięzłe podsumowanie danych do wysłania do Claude.
-    Zamiast wysyłać tysiące surowych wierszy — agregujemy statystyki.
-    Oszczędza tokeny i daje Claude lepsze dane do analizy.
+    Zwraca (tekst podsumowania do Claude, słownik metadanych do Notion).
     """
     if not rows:
-        return "Brak danych z ostatnich 24 godzin."
+        return "Brak danych z ostatnich 24 godzin.", {}
 
-    # Opóźnienia per linia per godzina
-    by_line_hour: dict[str, dict[int, list[float]]] = defaultdict(lambda: defaultdict(list))
-    by_line: dict[str, list[float]] = defaultdict(list)
-    total_with_delay = 0
-    total = len(rows)
+    by_line: dict[str, list[float]]           = defaultdict(list)
+    by_line_hour: dict[str, dict[int, list]]  = defaultdict(lambda: defaultdict(list))
+    hour_counts: dict[int, int]               = defaultdict(int)
 
     for row in rows:
-        line = row.get("line", "?")
+        line      = row.get("line", "?")
         delay_str = row.get("delay_min", "")
-        ts_local = row.get("timestamp_local", "")
+        ts_local  = row.get("timestamp_local", "")
 
-        if delay_str and delay_str != "":
+        if delay_str:
             try:
                 delay = float(delay_str)
                 by_line[line].append(delay)
-                total_with_delay += 1
-
-                # Wyciągnij godzinę z timestamp_local "YYYY-MM-DD HH:MM"
-                hour = int(ts_local.split(" ")[1].split(":")[0]) if " " in ts_local else -1
-                if hour >= 0:
-                    by_line_hour[line][hour].append(delay)
+                if " " in ts_local:
+                    h = int(ts_local.split(" ")[1].split(":")[0])
+                    by_line_hour[line][h].append(delay)
+                    hour_counts[h] += 1
             except ValueError:
                 pass
 
+    # Statystyki per linia
     lines_summary = []
+    line_avgs     = {}
+
     for line, delays in sorted(by_line.items()):
         if not delays:
             continue
-        avg = sum(delays) / len(delays)
-        max_d = max(delays)
-        late_count = sum(1 for d in delays if d > 2)
-        late_pct = round(100 * late_count / len(delays))
+        avg       = sum(delays) / len(delays)
+        max_d     = max(delays)
+        late_pct  = round(100 * sum(1 for d in delays if d > 2) / len(delays))
+        line_avgs[line] = avg
 
-        # Znajdź najgorsze godziny
         worst_hours = []
         if line in by_line_hour:
             hour_avgs = {
@@ -99,64 +99,70 @@ def summarize(rows: list[dict]) -> str:
                 for h, ds in by_line_hour[line].items()
                 if len(ds) >= 2
             }
-            worst = sorted(hour_avgs.items(), key=lambda x: x[1], reverse=True)[:3]
-            worst_hours = [f"{h}:00 (śr. +{round(a, 1)} min)" for h, a in worst]
+            for h, a in sorted(hour_avgs.items(), key=lambda x: x[1], reverse=True)[:3]:
+                worst_hours.append(f"{h}:00 (śr. +{round(a,1)} min)")
 
         lines_summary.append(
             f"Linia {line}: {len(delays)} obs., "
-            f"śr. opóźnienie {round(avg, 1)} min, "
-            f"maks. {round(max_d, 1)} min, "
-            f"spóźnionych > 2 min: {late_pct}%"
-            + (f", najgorsze godziny: {', '.join(worst_hours)}" if worst_hours else "")
+            f"śr. {round(avg,1)} min, maks. {round(max_d,1)} min, "
+            f"spóźnionych >2min: {late_pct}%"
+            + (f", najgorsze godz.: {', '.join(worst_hours)}" if worst_hours else "")
         )
 
-    # Ogólne statystyki godzinowe (wszystkie linie)
-    hour_counts: dict[int, int] = defaultdict(int)
-    for row in rows:
-        ts_local = row.get("timestamp_local", "")
-        if " " in ts_local:
-            try:
-                hour = int(ts_local.split(" ")[1].split(":")[0])
-                hour_counts[hour] += 1
-            except (ValueError, IndexError):
-                pass
+    # Metadane do Notion
+    all_delays = [d for delays in by_line.values() for d in delays]
+    avg_global = round(sum(all_delays) / len(all_delays), 1) if all_delays else 0
 
-    busiest = sorted(hour_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+    worst_line = max(line_avgs, key=line_avgs.get) if line_avgs else ""
+    best_line  = min(line_avgs, key=line_avgs.get) if line_avgs else ""
+
+    busiest = sorted(hour_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+    peak    = ", ".join(f"{h}:00" for h, _ in sorted(busiest))
+
+    if avg_global <= 2:
+        ocena = "🟢 Dobry"
+    elif avg_global <= 4:
+        ocena = "🟡 Średni"
+    else:
+        ocena = "🔴 Zły"
+
+    meta = {
+        "avg_delay":    avg_global,
+        "worst_line":   worst_line,
+        "best_line":    best_line,
+        "observations": len(rows),
+        "peak_hours":   peak,
+        "ocena":        ocena,
+    }
+
     busiest_str = ", ".join(f"{h}:00 ({c} obs.)" for h, c in sorted(busiest))
-
-    summary = f"""DANE ZTM — OKOLICE KAMERALNEJ 3, WARSZAWA
-Okres: ostatnie 24 godziny
-Łącznie rekordów: {total}
-Rekordów z danymi opóźnień: {total_with_delay}
+    summary_txt = f"""DANE ZTM — OKOLICE KAMERALNEJ 3
+Okres: ostatnie 24h | Rekordów: {len(rows)}
 
 STATYSTYKI PER LINIA:
-{chr(10).join(lines_summary) if lines_summary else "Brak danych o opóźnieniach."}
+{chr(10).join(lines_summary) if lines_summary else 'Brak danych.'}
 
-AKTYWNOŚĆ PO GODZINACH (top 5):
-{busiest_str if busiest_str else "Brak danych."}
+AKTYWNOŚĆ PO GODZINACH: {busiest_str or 'Brak danych.'}
 """
-    return summary
+    return summary_txt, meta
 
 
-# ─── WYWOŁANIE CLAUDE API ─────────────────────────────────────────────────────
+# ─── CLAUDE API ───────────────────────────────────────────────────────────────
 
 def generate_report(summary: str, report_date: str) -> str:
-    """Wysyła podsumowanie do Claude i zwraca raport w Markdown."""
-
-    prompt = f"""Jesteś analitykiem komunikacji miejskiej. Poniżej masz dane zebrane przez 24 godziny
-o opóźnieniach autobusów i tramwajów ZTM Warszawa w okolicach ul. Kameralnej 3 (Praga Północ).
+    prompt = f"""Jesteś analitykiem komunikacji miejskiej. Poniżej dane o opóźnieniach
+ZTM Warszawa w okolicach ul. Kameralnej 3 (Praga Północ) z ostatnich 24h.
 
 {summary}
 
-Napisz PRAKTYCZNY raport w Markdown dla mieszkańca tej ulicy. Raport ma zawierać:
+Napisz PRAKTYCZNY raport w Markdown dla mieszkańca tej ulicy:
 
-1. **Podsumowanie dnia** — ogólna ocena punktualności komunikacji (2-3 zdania)
-2. **Które linie działały najlepiej / najgorzej** — konkretne wnioski z danych
-3. **Godziny szczytu problemów** — kiedy opóźnienia były największe
-4. **Praktyczne wskazówki** — np. "Jeśli wyjeżdżasz o 8:00, weź pod uwagę X minut zapasu na linii Y"
-5. **Trend** — czy dziś było lepiej/gorzej niż typowo (jeśli masz dane porównawcze)
+1. **Podsumowanie dnia** — ogólna ocena punktualności (2-3 zdania)
+2. **Najlepsza / najgorsza linia** — konkretne wnioski
+3. **Godziny problemów** — kiedy było najgorzej
+4. **Wskazówki na jutro** — np. weź X minut zapasu na linii Y o godzinie Z
 
-Pisz po polsku, zwięźle, praktycznie. Nie przepisuj surowych danych — interpretuj je."""
+Pisz po polsku, zwięźle i praktycznie."""
 
     try:
         resp = httpx.post(
@@ -168,19 +174,81 @@ Pisz po polsku, zwięźle, praktycznie. Nie przepisuj surowych danych — interp
             },
             json={
                 "model":      "claude-sonnet-4-20250514",
-                "max_tokens": 1500,
+                "max_tokens": 1000,
                 "messages":   [{"role": "user", "content": prompt}],
             },
             timeout=60,
         )
         resp.raise_for_status()
-        content = resp.json()["content"][0]["text"]
-        return f"# Raport ZTM — Kameralna 3 — {report_date}\n\n{content}"
+        return resp.json()["content"][0]["text"]
 
     except httpx.HTTPError as e:
         print(f"  ⚠️  Błąd Claude API: {e}")
-        # Fallback — raport bez AI, tylko surowe statystyki
-        return f"# Raport ZTM — Kameralna 3 — {report_date}\n\n```\n{summary}\n```\n"
+        return f"Błąd generowania raportu: {e}\n\n```\n{summary}\n```"
+
+
+# ─── ZAPIS DO NOTION ──────────────────────────────────────────────────────────
+
+def save_to_notion(report_date: str, meta: dict, report_text: str):
+    if not NOTION_TOKEN:
+        print("  ℹ️  Brak NOTION_TOKEN — pomijam zapis do Notion")
+        return
+
+    headers = {
+        "Authorization":  f"Bearer {NOTION_TOKEN}",
+        "Content-Type":   "application/json",
+        "Notion-Version": "2022-06-28",
+    }
+
+    # Skróć raport do 2000 znaków (limit pola tekstowego Notion)
+    raport_skrot = report_text[:1950] + "…" if len(report_text) > 1950 else report_text
+
+    page = {
+        "parent": {"database_id": NOTION_DATABASE_ID},
+        "properties": {
+            "Name": {
+                "title": [{"text": {"content": f"Raport {report_date}"}}]
+            },
+            "Data": {
+                "date": {"start": report_date}
+            },
+            "Ocena dnia": {
+                "select": {"name": meta.get("ocena", "🟡 Średni")}
+            },
+            "Śr. opóźnienie (min)": {
+                "number": meta.get("avg_delay", 0)
+            },
+            "Najgorsza linia": {
+                "rich_text": [{"text": {"content": meta.get("worst_line", "")}}]
+            },
+            "Najlepsza linia": {
+                "rich_text": [{"text": {"content": meta.get("best_line", "")}}]
+            },
+            "Liczba obserwacji": {
+                "number": meta.get("observations", 0)
+            },
+            "Szczyt problemów": {
+                "rich_text": [{"text": {"content": meta.get("peak_hours", "")}}]
+            },
+            "Raport": {
+                "rich_text": [{"text": {"content": raport_skrot}}]
+            },
+        }
+    }
+
+    try:
+        resp = httpx.post(
+            "https://api.notion.com/v1/pages",
+            headers=headers,
+            json=page,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        print(f"  ✅ Zapisano do Notion: Raport {report_date}")
+    except httpx.HTTPError as e:
+        print(f"  ⚠️  Błąd zapisu do Notion: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"      Szczegóły: {e.response.text[:300]}")
 
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
@@ -202,17 +270,21 @@ def analyze():
         print("  ℹ️  Brak danych — pomijam analizę")
         return
 
-    summary = summarize(rows)
-    print(f"  🤖 Wysyłam podsumowanie do Claude ({len(summary)} znaków)...")
+    summary_txt, meta = summarize(rows)
+    print(f"  📈 Avg opóźnienie: {meta.get('avg_delay')} min | Ocena: {meta.get('ocena')}")
+    print(f"  🤖 Generuję raport przez Claude...")
 
-    report = generate_report(summary, report_date)
+    report_text = generate_report(summary_txt, report_date)
 
+    # Zapis lokalny (.md w repo)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     report_path = REPORTS_DIR / f"{report_date}.md"
-    report_path.write_text(report, encoding="utf-8")
+    full_report = f"# Raport ZTM — Kameralna 3 — {report_date}\n\n{report_text}"
+    report_path.write_text(full_report, encoding="utf-8")
+    print(f"  💾 Zapisano lokalnie: {report_path}")
 
-    print(f"  ✅ Raport zapisany: {report_path}")
-    print(f"\n--- PODGLĄD ---\n{report[:500]}...")
+    # Zapis do Notion
+    save_to_notion(report_date, meta, report_text)
 
 
 if __name__ == "__main__":
