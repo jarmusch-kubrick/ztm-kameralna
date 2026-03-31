@@ -10,10 +10,11 @@
 STOPS = [
 
     # ── RATUSZOWA-ZOO ────────────────────────────────────────────────────────
+    # busstopId=1004 zweryfikowane przez targeo.pl (id 100401, 100402)
     # Słupek 01 → kierunek Ratuszowa (centrum)
     {
         "name": "Ratuszowa-Zoo",
-        "busstopId": "4027",   # DO WERYFIKACJI
+        "busstopId": "1004",
         "busstopNr": "01",
         "lines": ["6", "18", "20", "23", "28", "W"],
         "type": "tram",
@@ -23,7 +24,7 @@ STOPS = [
     # Słupek 02 → kierunek Pl. Hallera (praga)
     {
         "name": "Ratuszowa-Zoo",
-        "busstopId": "4027",   # DO WERYFIKACJI
+        "busstopId": "1004",
         "busstopNr": "02",
         "lines": ["6", "18", "20", "23", "28"],
         "type": "tram",
@@ -32,10 +33,11 @@ STOPS = [
     },
 
     # ── DWORZEC WILEŃSKI ─────────────────────────────────────────────────────
+    # busstopId=1003 zweryfikowane przez Warszawikia i targeo.pl (id 100305 itd.)
     # Słupek 01 → autobusy kierunek Ząbkowska
     {
         "name": "Dw. Wileński",
-        "busstopId": "4025",   # DO WERYFIKACJI
+        "busstopId": "1003",
         "busstopNr": "01",
         "lines": ["120", "135", "162", "166", "169", "170", "338",
                   "509", "512", "N02", "N03", "N14", "N16", "N21", "N64", "N71"],
@@ -46,7 +48,7 @@ STOPS = [
     # Słupek 02 → autobusy kierunek Inżynierska
     {
         "name": "Dw. Wileński",
-        "busstopId": "4025",   # DO WERYFIKACJI
+        "busstopId": "1003",
         "busstopNr": "02",
         "lines": ["162", "166", "169", "170", "190", "338",
                   "509", "512", "N03", "N14", "N64"],
@@ -57,7 +59,7 @@ STOPS = [
     # Słupek 03 → tramwaje + autobusy kierunek Park Praski
     {
         "name": "Dw. Wileński",
-        "busstopId": "4025",   # DO WERYFIKACJI
+        "busstopId": "1003",
         "busstopNr": "03",
         "lines": ["4", "13", "20", "23", "26", "76", "W", "160", "190"],
         "type": "tram",
@@ -67,7 +69,7 @@ STOPS = [
     # Słupek 04 → autobusy kierunek Rzeszotarskiej
     {
         "name": "Dw. Wileński",
-        "busstopId": "4025",   # DO WERYFIKACJI
+        "busstopId": "1003",
         "busstopNr": "04",
         "lines": ["120", "135", "160", "162", "170", "190",
                   "338", "512", "N02", "N11", "N61"],
@@ -78,7 +80,7 @@ STOPS = [
     # Słupek 05 → autobusy kierunek Rondo Starzyńskiego
     {
         "name": "Dw. Wileński",
-        "busstopId": "4025",   # DO WERYFIKACJI
+        "busstopId": "1003",
         "busstopNr": "05",
         "lines": ["135", "509", "N11", "N16", "N21", "N61", "N71"],
         "type": "bus",
@@ -88,7 +90,7 @@ STOPS = [
     # Słupek 07 → tramwaje kierunek Ząbkowska
     {
         "name": "Dw. Wileński",
-        "busstopId": "4025",   # DO WERYFIKACJI
+        "busstopId": "1003",
         "busstopNr": "07",
         "lines": ["3", "6", "13", "25", "26", "28", "W"],
         "type": "tram",
